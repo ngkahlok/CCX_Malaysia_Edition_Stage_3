@@ -1,18 +1,3 @@
-# =============================================================================
-#  Smart Solar Micro-Inverter Controller - Application Firmware
-#  Target : ChipInventor RVBL-2 (RV32I + Zmmul + Xicrc)
-#  Build  : RVBL Firmware Builder (make -> build/firmware.txt)
-#
-#  Protocol (all multi-byte values least-significant byte first)
-#    GPIO in  P0      : start trigger
-#    UART RX (37 B)   : CMD(1) | V1(4) I1(4) ... V4(4) I4(4) | CRC32(4)
-#                       V in mV, I in mA, CRC32 over the 33 preceding bytes
-#    UART TX (5 B)    : STATUS(1) | AVG_POWER_uW(4)
-#    GPIO out P4      : done
-#    GPIO out P5      : error LED  (CRC mismatch / invalid command)
-#    GPIO out P6      : relay trip (avg > 60 W, or SHUTDOWN command)
-# =============================================================================
-
 # ---------------------------------------------------------------- peripherals
 .equ GPIO_BASE,       0xF0000000
 .equ GPIO_DATAOUT,    0x0
@@ -27,12 +12,9 @@
 .equ UART_RXDONE,     0x2          # CONTROL bit 1 : byte received
 .equ UART_TXDONE,     0x4          # CONTROL bit 2 : transmitter ready
 
-# -------------------------------------------------------- Xicrc (CHECK THESE)
-# Encoding: opcode 0x33, funct7 0x40. Set funct3 to the value of crcw in our
-# Block Guide. Assumed semantics: rd = CRC-32 update of rs1 with byte rs2[7:0].
-.equ F3_CRCW,         0x2          # TODO: confirm from Block Guide
-.equ CRC_INIT,        0xFFFFFFFF   # TODO: confirm initial value
-.equ CRC_XOROUT,      0xFFFFFFFF   # TODO: confirm final XOR
+# ------------------------------------------------------------------- Xicrc
+.equ F3_CRC_BYTE,     0x0
+.equ CRC_INIT,        0xFFFF
 
 # --------------------------------------------------------------- application
 .equ CMD_MEASURE,     0x01
@@ -97,9 +79,7 @@ sample_loop:
     addi s8, s8, -1
     bnez s8, sample_loop
 
-    li   t0, CRC_XOROUT            # 4. finalize CRC, compare with received
-    xor  s2, s2, t0
-    jal  ra, rx_word               # received CRC (not fed into the CRC)
+    jal  ra, rx_half               # 4. received CRC-16 (not fed into the CRC)
     bne  a0, s2, crc_error
 
     li   t0, CMD_MEASURE           # 5. validate command
@@ -163,7 +143,7 @@ rx_byte:
 # rx_byte_crc: receive one byte and feed it into the CRC.  Link: ra
 rx_byte_crc:
     jal  t5, rx_byte
-    .insn r 0x33, F3_CRCW, 0x40, s2, s2, a0     # crcw s2, s2, a0  [Xicrc]
+    .insn r 0x33, F3_CRC_BYTE, 0x40, s2, a0, s2  # crc s2 <- CRC(s2, a0[7:0])  [Xicrc]
     ret
 
 # rx_word_crc: receive 4 bytes LSB first, feed each into the CRC,
@@ -173,7 +153,7 @@ rx_word_crc:
     li   t1, 0                     # bit position
 rxwc_loop:
     jal  t5, rx_byte
-    .insn r 0x33, F3_CRCW, 0x40, s2, s2, a0     # crcw s2, s2, a0  [Xicrc]
+    .insn r 0x33, F3_CRC_BYTE, 0x40, s2, a0, s2  # crc s2 <- CRC(s2, a0[7:0])  [Xicrc]
     sll  t2, a0, t1
     or   a1, a1, t2
     addi t1, t1, 8
@@ -182,17 +162,17 @@ rxwc_loop:
     mv   a0, a1
     ret
 
-# rx_word: receive 4 bytes LSB first without CRC update.  Link: ra
-rx_word:
+# rx_half: receive 2 bytes LSB first without CRC update.  Link: ra
+rx_half:
     li   a1, 0
     li   t1, 0
-rxw_loop:
+rxh_loop:
     jal  t5, rx_byte
     sll  t2, a0, t1
     or   a1, a1, t2
     addi t1, t1, 8
-    li   t3, 32
-    bne  t1, t3, rxw_loop
+    li   t3, 16
+    bne  t1, t3, rxh_loop
     mv   a0, a1
     ret
 
